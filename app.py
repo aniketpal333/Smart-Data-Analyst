@@ -8,6 +8,7 @@ from typing import Optional, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
+from PIL import Image
 
 # Initialize the LLM (used for decision making and general responses)
 llm = ChatGoogleGenerativeAI(
@@ -217,9 +218,22 @@ st.title("AI-Powered Data Assistant")
 uploaded_file = st.file_uploader("Upload a CSV or Excel file", type=["csv", "xls", "xlsx"])
 user_query = st.text_input("Enter your query:")
 
+def render_image(filepath: str):
+   """
+   filepath: path to the image. Must have a valid file extension.
+   """
+   mime_type = filepath.split('.')[-1:][0].lower()
+   with open(filepath, "rb") as f:
+        content_bytes = f.read()
+        content_b64encoded = base64.b64encode(content_bytes).decode()
+        image_string = f'data:image/{mime_type};base64,{content_b64encoded}'
+        st.image(image_string)
+
 if st.button("Submit"):
     state = LLMState(query=user_query, file=uploaded_file)
     result = executable.invoke(state)
     st.write(f"**Chatbot:** {result['response']}")
     if "image" in result:
-        st.image(result["image"])
+        # st.image(result["image"])
+        st.image(result["image"], caption='My Image', use_column_width=True)
+        # render_image(result["image"])
