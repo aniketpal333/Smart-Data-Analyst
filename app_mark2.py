@@ -1,5 +1,6 @@
 import io
 import base64
+from matplotlib import table
 import streamlit as st
 import pandas as pd
 from typing import Optional, Any, Dict, List
@@ -74,7 +75,7 @@ def data_loader_agent(state: LLMState):
     raw_output = (
         f"Loaded file: {st.session_state.memory['file_name']}\n"
         f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n"
-        f"Columns: {', '.join(df.columns)}"
+        f"Columns: {df.dtypes}\n"
     )
     final_output = two_way_exchange("data_loader_agent", raw_output, state)
     return {"response": final_output}
@@ -86,7 +87,8 @@ def data_summarization_agent(state: LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file uploaded. Please upload a file for summarization."}
     df = state.memory["file_data"]
-    raw_output = "Descriptive Statistics:\n" + df.describe().to_string()
+    sts = df.describe()
+    raw_output = "Descriptive Statistics:\n" + st.table(sts.loc[["mean", "std"]])
     final_output = two_way_exchange("data_summarization_agent", raw_output, state)
     return {"response": final_output}
 
@@ -224,7 +226,7 @@ if st.button("Submit"):
         memory=st.session_state.memory
     )
     result = executable.invoke(state)
-    st.write(f"**Chatbot:** {result['response']}")
+    #st.write(f"**Chatbot:** {result['response']}")
     st.session_state.memory["chat_history"].append({"user": user_query, "bot": result["response"]})
 
 if st.session_state.memory["chat_history"]:
