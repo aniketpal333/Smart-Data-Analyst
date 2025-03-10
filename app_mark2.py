@@ -1,6 +1,7 @@
 import io
 import base64
 from matplotlib import table
+import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
 from typing import Optional, Any, Dict, List
@@ -57,7 +58,7 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
     suggestion = "".join(chunk.content for chunk in llm.stream(suggestion_prompt)).strip()
     
     update_prompt = (
-        f"You are the {agent_name} in the AI Data Science Team. Your original output was:\n"
+        f"You are the {agent_name} in the Smart AI Data Science Application. Your original output was:\n"
         f"{raw_message}\n\n"
         f"The head LLM suggests: {suggestion}\n\n"
         "Update your output based on this suggestion. Respond only with the revised output."
@@ -88,7 +89,7 @@ def data_summarization_agent(state: LLMState):
         return {"response": "No file uploaded. Please upload a file for summarization."}
     df = state.memory["file_data"]
     sts = df.describe()
-    raw_output = "Descriptive Statistics:\n" + st.table(sts.loc[["mean", "std"]])
+    raw_output = "Descriptive Statistics:\n" + st.table(sts.loc[["count", "mean", "std", "min", "25%", "50%", "75%", "max"]])
     final_output = two_way_exchange("data_summarization_agent", raw_output, state)
     return {"response": final_output}
 
@@ -101,20 +102,45 @@ def python_executor_agent(state: LLMState):
         return {"response": "No file loaded. Please upload a file first."}
     df = state.memory["file_data"]
     prompt = (
-        f"Generate Pandas code to answer the following question: {state.query}\n"
-        f"DataFrame columns available: {', '.join(df.columns)}\n"
-        "For example, if the question asks about the relationship between 'age' and 'y', "
-        "the code should compute min, max, mean, etc. for the 'age' column grouped by 'y'.\n"
-        "Return only the code. Assume the DataFrame is called 'df' and store the final answer in a variable named 'result'."
+    f"Generate Pandas code to answer the following question: {state.query}\n"
+    f"DataFrame columns available: {', '.join(df.columns)}\n"
+    "Do not return only import statements or placeholders. Use the provided DataFrame 'df' to perform a relevant computation and assign the final result to a variable named 'result'.\n"
+    "For example, if the question asks for descriptive statistics, your code should include something like:\n"
+    "result = df.describe()\n"
+    "Return only the code without any markdown formatting."
     )
     raw_code = "".join(chunk.content for chunk in llm.stream(prompt)).strip()
+    
+    # Remove markdown formatting if present.
+    if raw_code.startswith("```"):
+        raw_code_lines = raw_code.splitlines()
+        if raw_code_lines[0].startswith("```"):
+            raw_code_lines = raw_code_lines[1:]
+        if raw_code_lines and raw_code_lines[-1].startswith("```"):
+            raw_code_lines = raw_code_lines[:-1]
+        raw_code = "\n".join(raw_code_lines)
+    
     refined_code = two_way_exchange("python_executor_agent", raw_code, state)
+    
+    if refined_code.startswith("```"):
+        refined_code_lines = refined_code.splitlines()
+        if refined_code_lines[0].startswith("```"):
+            refined_code_lines = refined_code_lines[1:]
+        if refined_code_lines and refined_code_lines[-1].startswith("```"):
+            refined_code_lines = refined_code_lines[:-1]
+        refined_code = "\n".join(refined_code_lines)
+    
+    # Debug: Log the refined code
+    print("Refined Code:\n", refined_code)
+    
     try:
         exec_locals = {"df": df}
         exec(refined_code, {}, exec_locals)
-        result_value = exec_locals.get("result", "No result found.")
+        if "result" not in exec_locals:
+            return {"response": f"Execution completed, but no 'result' variable was set.\nGenerated Code:\n{refined_code}"}
+        result_value = exec_locals.get("result")
     except Exception as e:
-        result_value = f"Error executing code: {str(e)}"
+        result_value = f"Error executing code: {str(e)}\nCode:\n{refined_code}"
     return {"response": str(result_value)}
 
 # ----------------------------------------------------------------------
@@ -137,6 +163,7 @@ def general_ai_agent(state: LLMState):
 def determine_agent(state: LLMState) -> str:
     chat_hist = chat_history_text(state.memory.get("chat_history", []))
     file_status = "yes" if state.memory.get("file_data") is not None else "no"
+    
     prompt = (
         "You are the head LLM tasked with choosing the most suitable agent for the current query. "
         "Consider the following context:\n\n"
@@ -148,20 +175,23 @@ def determine_agent(state: LLMState) -> str:
         "- data_summarization_agent: For descriptive statistics.\n"
         "- python_executor_agent: For dynamically generating and executing Pandas code (e.g. column relationships).\n"
         "- general_ai_agent: For general conversation.\n\n"
+        "Examples for guidance:\n"
+        "1. Chat History: None, User Query: 'Please load my data file so I can inspect its structure.', File Available: yes → Expected: data_loader_agent\n"
+        "2. Chat History: ['User uploaded file \"data.csv\".'], User Query: 'Can you provide descriptive statistics for the dataset?', File Available: yes → Expected: data_summarization_agent\n"
+        "3. Chat History: None, User Query: 'I need to analyze the relationship between the columns \"age\" and \"income\" using code.', File Available: yes → Expected: python_executor_agent\n"
+        "4. Chat History: None, User Query: 'What is the weather like today?', File Available: no → Expected: general_ai_agent\n\n"
         "Respond only with the name of the agent that best suits this query."
     )
+    
     decision = "".join(chunk.content for chunk in llm.stream(prompt)).strip().lower()
-    valid_agents = {
-        "data_loader_agent",
-        "data_summarization_agent",
-        "python_executor_agent",
-        "general_ai_agent"
-    }
+    valid_agents = {"data_loader_agent", "data_summarization_agent", "python_executor_agent", "general_ai_agent"}
     chosen_agent = decision if decision in valid_agents else "general_ai_agent"
+    
     selection_prompt = (
         f"You selected {chosen_agent} based on the context. "
         "After further analysis, confirm the final agent selection. Respond only with the final agent name."
     )
+    
     final_decision = "".join(chunk.content for chunk in llm.stream(selection_prompt)).strip().lower()
     return final_decision if final_decision in valid_agents else chosen_agent
 
@@ -226,7 +256,7 @@ if st.button("Submit"):
         memory=st.session_state.memory
     )
     result = executable.invoke(state)
-    #st.write(f"**Chatbot:** {result['response']}")
+    st.write(f"**Chatbot:** {result['response']}")
     st.session_state.memory["chat_history"].append({"user": user_query, "bot": result["response"]})
 
 if st.session_state.memory["chat_history"]:
@@ -234,3 +264,9 @@ if st.session_state.memory["chat_history"]:
     for chat in st.session_state.memory["chat_history"]:
         st.write(f"**You:** {chat['user']}")
         st.write(f"**AI:** {chat['bot']}")
+
+# After executing the code and obtaining 'result'
+if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
+    st.pyplot(result)
+else:
+    st.write(result)
