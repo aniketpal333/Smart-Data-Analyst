@@ -266,7 +266,7 @@ if st.session_state.memory["chat_history"]:
         st.write(f"**AI:** {chat['bot']}")
 
 # After executing the code and obtaining 'result'
-if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
-    st.pyplot(result)
-else:
-    st.write(result)
+# if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
+#     st.pyplot(result)
+# else:
+#     st.write(result)
