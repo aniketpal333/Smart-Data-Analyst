@@ -139,6 +139,11 @@ def python_executor_agent(state: LLMState):
         if "result" not in exec_locals:
             return {"response": f"Execution completed, but no 'result' variable was set.\nGenerated Code:\n{refined_code}"}
         result_value = exec_locals.get("result")
+        # After executing the code and obtaining 'result'
+        if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
+            st.pyplot(result)
+        else:
+            st.write(result)
     except Exception as e:
         result_value = f"Error executing code: {str(e)}\nCode:\n{refined_code}"
     return {"response": str(result_value)}
@@ -265,8 +270,3 @@ if st.session_state.memory["chat_history"]:
         st.write(f"**You:** {chat['user']}")
         st.write(f"**AI:** {chat['bot']}")
 
-# After executing the code and obtaining 'result'
-if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
-    st.pyplot(result)
-else:
-    st.write(result)
