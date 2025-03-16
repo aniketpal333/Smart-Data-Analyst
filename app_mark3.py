@@ -89,39 +89,39 @@ def data_loader_agent(state: LLMState):
 # Agent: Data Summarizer – computes descriptive statistics and (if possible) trend analysis.
 # Static code: runs df.describe() and, if a datetime column exists, performs a 5-point rolling average trend.
 # ----------------------------------------------------------------------
-# def data_summarization_agent(state: LLMState):
-#     if state.memory.get("file_data") is None:
-#         return {"response": "No file uploaded. Please upload a file for summarization."}
-#     df = state.memory["file_data"]
-#     stats = df.describe().to_string()
-#     trend_text = ""
-#     figure = None
+def data_summarization_agent(state: LLMState):
+    if state.memory.get("file_data") is None:
+        return {"response": "No file uploaded. Please upload a file for summarization."}
+    df = state.memory["file_data"]
+    stats = df.describe().to_string()
+    trend_text = ""
+    figure = None
 
-#     # Check for a datetime column for trend analysis.
-#     time_columns = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
-#     if time_columns:
-#         time_col = time_columns[0]
-#         df_sorted = df.sort_values(by=time_col)
-#         numeric_cols = df_sorted.select_dtypes(include=["number"]).columns.tolist()
-#         if numeric_cols:
-#             trend_col = numeric_cols[0]
-#             rolling_avg = df_sorted[trend_col].rolling(window=5).mean()
-#             trend_text = (
-#                 f"\nA trend analysis on '{trend_col}' (using a 5-point rolling average) indicates how values change over time."
-#             )
-#             # Create a simple line plot.
-#             fig, ax = plt.subplots()
-#             ax.plot(df_sorted[time_col], df_sorted[trend_col], label="Original Data")
-#             ax.plot(df_sorted[time_col], rolling_avg, label="Rolling Average", linestyle='--')
-#             ax.set_xlabel(time_col)
-#             ax.set_ylabel(trend_col)
-#             ax.set_title(f"Trend Analysis of {trend_col}")
-#             ax.legend()
-#             figure = fig
+    # Check for a datetime column for trend analysis.
+    time_columns = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+    if time_columns:
+        time_col = time_columns[0]
+        df_sorted = df.sort_values(by=time_col)
+        numeric_cols = df_sorted.select_dtypes(include=["number"]).columns.tolist()
+        if numeric_cols:
+            trend_col = numeric_cols[0]
+            rolling_avg = df_sorted[trend_col].rolling(window=5).mean()
+            trend_text = (
+                f"\nA trend analysis on '{trend_col}' (using a 5-point rolling average) indicates how values change over time."
+            )
+            # Create a simple line plot.
+            fig, ax = plt.subplots()
+            ax.plot(df_sorted[time_col], df_sorted[trend_col], label="Original Data")
+            ax.plot(df_sorted[time_col], rolling_avg, label="Rolling Average", linestyle='--')
+            ax.set_xlabel(time_col)
+            ax.set_ylabel(trend_col)
+            ax.set_title(f"Trend Analysis of {trend_col}")
+            ax.legend()
+            figure = fig
 
-#     raw_output = f"Descriptive statistics:\n{stats}{trend_text}"
-#     plain_output = explain_in_plain_language(raw_output, "data_summarization_agent", chat_history_text(state.memory.get("chat_history", [])))
-#     return {"response": plain_output, "figure": figure}
+    raw_output = f"Descriptive statistics:\n{stats}{trend_text}"
+    plain_output = explain_in_plain_language(raw_output, "data_summarization_agent", chat_history_text(state.memory.get("chat_history", [])))
+    return {"response": plain_output, "figure": figure}
 
 # ----------------------------------------------------------------------
 # Agent: Python Executor – executes a static piece of code based on known query keywords.
@@ -235,8 +235,8 @@ def determine_agent(state: LLMState) -> str:
         "You are an expert in natural language understanding. Based on the following context, determine which of the following static agents "
         "should handle the user's query. The available agents are:\n"
         "- data_loader_agent: For file inspection.\n"
-        #"- data_summarization_agent: For descriptive statistics and trend analysis.\n"
-        "- python_executor_agent: For executing static code such as analyzing data, describing data, visualizing, or computing success rates.\n"
+        "- data_summarization_agent: For descriptive statistics and trend analysis.\n"
+        "- python_executor_agent: For executing static code such as analyzing data, visualizing, or computing success rates.\n"
         "- general_ai_agent: For general conversation.\n\n"
         f"Chat History:\n{chat_hist}\n\n"
         f"User Query: \"{state.query.strip()}\"\n"
@@ -265,7 +265,7 @@ graph = StateGraph(LLMState)
 graph.add_node("supervisor", supervisor)
 graph.add_node("dispatcher", dispatcher)
 graph.add_node("data_loader_agent", data_loader_agent)
-#graph.add_node("data_summarization_agent", data_summarization_agent)
+graph.add_node("data_summarization_agent", data_summarization_agent)
 graph.add_node("python_executor_agent", python_executor_agent)
 graph.add_node("general_ai_agent", general_ai_agent)
 
