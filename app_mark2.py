@@ -82,16 +82,43 @@ def data_loader_agent(state: LLMState):
     return {"response": final_output}
 
 # ----------------------------------------------------------------------
-# Agent: Data Summarizer – computes descriptive statistics.
+# Agent: Data Summarizer – computes descriptive statistics and performs trend analysis.
 # ----------------------------------------------------------------------
 def data_summarization_agent(state: LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file uploaded. Please upload a file for summarization."}
+    
     df = state.memory["file_data"]
-    sts = df.describe()
-    raw_output = "Descriptive Statistics:\n" + st.table(sts.loc[["count", "mean", "std", "min", "25%", "50%", "75%", "max"]])
+    summary_stats = df.describe().to_string()
+    
+    trend_analysis_text = ""
+    figure = None
+    # Check for a datetime column for trend analysis
+    time_columns = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+    if time_columns:
+        time_col = time_columns[0]
+        df_sorted = df.sort_values(by=time_col)
+        # Choose first numerical column (excluding the datetime column)
+        numeric_cols = df_sorted.select_dtypes(include=["number"]).columns.tolist()
+        if numeric_cols:
+            trend_col = numeric_cols[0]
+            rolling_avg = df_sorted[trend_col].rolling(window=5).mean()
+            trend_analysis_text = f"\nTrend Analysis on {trend_col} (Rolling Average, window=5):\n{rolling_avg.tail(5).to_string()}"
+            
+            # Create a matplotlib figure for visualization
+            fig, ax = plt.subplots()
+            ax.plot(df_sorted[time_col], df_sorted[trend_col], label="Original Data")
+            ax.plot(df_sorted[time_col], rolling_avg, label="Rolling Average", linestyle='--')
+            ax.set_xlabel(time_col)
+            ax.set_ylabel(trend_col)
+            ax.set_title(f"Trend Analysis of {trend_col}")
+            ax.legend()
+            figure = fig
+
+    raw_output = f"Descriptive Statistics:\n{summary_stats}{trend_analysis_text}"
     final_output = two_way_exchange("data_summarization_agent", raw_output, state)
-    return {"response": final_output}
+    # Return the textual response and, if available, the figure for visualization.
+    return {"response": final_output, "figure": figure}
 
 # ----------------------------------------------------------------------
 # Agent: Python Executor – dynamically generates and executes Pandas code
@@ -101,13 +128,32 @@ def python_executor_agent(state: LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file loaded. Please upload a file first."}
     df = state.memory["file_data"]
+    query_lower = state.query.lower()
+    
+    # If query asks for success or failure rates, compute and visualize them.
+    if "success rate" in query_lower or "failure rate" in query_lower:
+        status_column = next((col for col in df.columns if "y" in col.lower()), None)
+        if status_column:
+            rates = df[status_column].value_counts(normalize=True) * 100
+            response_text = f"Success/Failure Rate (%):\n{rates.to_string()}"
+            
+            # Create a bar chart using matplotlib
+            fig, ax = plt.subplots()
+            rates.plot(kind='bar', ax=ax)
+            ax.set_ylabel("Percentage")
+            ax.set_title(f"Success/Failure Rate for {status_column}")
+            return {"response": response_text, "figure": fig}
+        else:
+            return {"response": "No status column found to compute success/failure rate."}
+    
+    # Otherwise, generate and execute Pandas code dynamically.
     prompt = (
-    f"Generate Pandas code to answer the following question: {state.query}\n"
-    f"DataFrame columns available: {', '.join(df.columns)}\n"
-    "Do not return only import statements or placeholders. Use the provided DataFrame 'df' to perform a relevant computation and assign the final result to a variable named 'result'.\n"
-    "For example, if the question asks for descriptive statistics, your code should include something like:\n"
-    "result = df.describe()\n"
-    "Return only the code without any markdown formatting."
+        f"Generate Pandas code to answer the following question: {state.query}\n"
+        f"DataFrame columns available: {', '.join(df.columns)}\n"
+        "Do not return only import statements or placeholders. Use the provided DataFrame 'df' to perform a relevant computation and assign the final result to a variable named 'result'.\n"
+        "For example, if the question asks for descriptive statistics, your code should include something like:\n"
+        "result = df.describe()\n"
+        "Return only the code without any markdown formatting."
     )
     raw_code = "".join(chunk.content for chunk in llm.stream(prompt)).strip()
     
@@ -172,8 +218,8 @@ def determine_agent(state: LLMState) -> str:
         f"File Available: {file_status}\n\n"
         "Available Agents:\n"
         "- data_loader_agent: For file structure analysis.\n"
-        "- data_summarization_agent: For descriptive statistics.\n"
-        "- python_executor_agent: For dynamically generating and executing Pandas code (e.g. column relationships).\n"
+        "- data_summarization_agent: For descriptive statistics and trend analysis.\n"
+        "- python_executor_agent: For dynamically generating and executing Pandas code (e.g. column relationships, success/failure rates).\n"
         "- general_ai_agent: For general conversation.\n\n"
         "Examples for guidance:\n"
         "1. Chat History: None, User Query: 'Please load my data file so I can inspect its structure.', File Available: yes → Expected: data_loader_agent\n"
@@ -257,6 +303,9 @@ if st.button("Submit"):
     )
     result = executable.invoke(state)
     st.write(f"**Chatbot:** {result['response']}")
+    # If a matplotlib figure is returned, display it.
+    if result.get("figure") is not None:
+        st.pyplot(result["figure"])
     st.session_state.memory["chat_history"].append({"user": user_query, "bot": result["response"]})
 
 if st.session_state.memory["chat_history"]:
@@ -264,9 +313,3 @@ if st.session_state.memory["chat_history"]:
     for chat in st.session_state.memory["chat_history"]:
         st.write(f"**You:** {chat['user']}")
         st.write(f"**AI:** {chat['bot']}")
-
-# After executing the code and obtaining 'result'
-# if hasattr(result, "axes"):  # crude check if it's a Matplotlib figure
-#     st.pyplot(result)
-# else:
-#     st.write(result)
