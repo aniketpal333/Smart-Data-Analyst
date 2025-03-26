@@ -6,6 +6,8 @@ from typing import Optional, Any, Dict, List
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
 
 # ----------------------------------------------------------------------
 # Initialize Head LLM (Supervisor) – the "Team Lead" that coordinates outputs.
@@ -74,6 +76,159 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
     ).strip()
     return revised_output
 
+def data_analyser_agent(state:LLMState):
+    if state.memory.get("file_data") is None:
+        return {"response": "No file uploaded. Please upload a file for summarization."}
+
+    df = state.memory["file_data"]
+
+    df = data_preprocessing(df)
+
+    # prompt = f"""
+    # Given the following dataset columns: {list(df.columns)},
+    # identify the most probable target features for predictive modeling.
+    # Return only the column names that are suitable as target variables.
+    # """
+    # response = llm.predict(prompt)
+    # response = response.split(",")
+
+    # probable_targets = response
+    # selected_option = st.selectbox("Choose a target feature:", probable_targets)
+    # st.write(f"You selected: {selected_option}")
+
+    x = df.drop("poutcome_success", axis = 1)
+    y = df["poutcome_success"]
+
+    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size = 0.2, random_state = 42)
+
+    xgb_model = xgb.XGBClassifier(
+    n_estimators=100,       # Number of trees
+    learning_rate=0.1,      # Learning rate
+    max_depth=3,            # Maximum tree depth
+    random_state=42,
+    eval_metric='logloss'     # Evaluation metric
+    )
+
+    xgb_model.fit(x_train, y_train)
+
+    y_pred_prob_xgb = xgb_model.predict_proba(x_test)[:, 1]
+    x_test_prob_xgb = x_test.copy()
+    x_test_prob_xgb["pred_prob"] = y_pred_prob_xgb
+
+    x_test_prob_xgb.sort_values(by='pred_prob', ascending = False, inplace = True)
+
+    high_prob = x_test_prob_xgb[x_test_prob_xgb['pred_prob'] > 0.72].copy()
+
+    # List of target features.
+    features = ['age', 'balance', 'day', 'duration', 'campaign', 'pdays', 'previous']
+
+    # Dictionary to store the common range (IQR) for each feature.
+    common_ranges = {}
+
+    # Remove outliers from each feature using the 1.5 * IQR rule.
+    for col in features:
+        Q1 = high_prob[col].quantile(0.25)
+        Q3 = high_prob[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+    
+        # Save the common range (the IQR)
+        common_ranges[col] = (round(Q1), round(Q3))
+    
+        # Remove outliers for this feature.
+        high_prob = high_prob[(high_prob[col] >= lower_bound) & (high_prob[col] <= upper_bound)]
+
+    # Define the list of columns to consider
+    columns_list = [
+        'job_blue-collar', 'job_entrepreneur', 'job_housemaid', 
+        'job_management', 'job_retired', 'job_self-employed', 'job_services',
+        'job_student', 'job_technician', 'job_unemployed', 'marital_married',
+        'marital_single', 'education_secondary', 'education_tertiary',
+        'default_yes', 'housing_yes', 'loan_yes', 'contact_telephone',
+        'month_aug', 'month_dec', 'month_feb', 'month_jan', 'month_jul',
+        'month_jun', 'month_mar', 'month_may', 'month_nov', 'month_oct',
+        'month_sep', 'y_yes'
+    ]
+
+    # Filter the DataFrame for rows where 'pred_prob' > 0.72
+    filtered_df = x_test_prob_xgb[x_test_prob_xgb['pred_prob'] > 0.72]
+
+    # Create a dictionary to store counts for each column
+    counts = {}
+
+    # For each column in the list, count the rows where the column is True (or 1)
+    for col in columns_list:
+        if col in filtered_df.columns:
+            # If the column is numeric (0/1) or boolean, this will work.
+            # If the column is a string, you might need to map it to a boolean.
+            count_true = filtered_df[col].astype(bool).sum()
+            counts[col] = count_true
+
+    # Extract the maximum for each category
+    max_job, job_count = get_max_category(counts, 'job_')
+    max_marital, marital_count = get_max_category(counts, 'marital_')
+    max_education, education_count = get_max_category(counts, 'education_')
+    max_month, month_count = get_max_category(counts, 'month_')
+
+    category_counts = {
+        "max_job": {"category": max_job, "count": job_count},
+        "max_marital": {"category": max_marital, "count": marital_count},
+        "max_education": {"category": max_education, "count": education_count},
+        "max_month": {"category": max_month, "count": month_count},
+    }
+
+    # Convert category_counts and common_ranges into human-readable text
+    category_counts_str = "\n".join(
+        [f"- {key.replace('max_', '').capitalize()}: {value['category']} (Count: {value['count']})"
+        for key, value in category_counts.items()]
+    )
+
+    common_ranges_str = "\n".join(
+        [f"- {col}: Q1={iqr[0]}, Q3={iqr[1]}" for col, iqr in common_ranges.items()]
+    )
+
+    # Create the raw message to be sent to the two-way exchange function
+    raw_message = f"""
+    The analysis identified the most prominent categorical features among high-probability data points: {category_counts_str}
+    Additionally, we determined the common value ranges for numerical features (IQR method): {common_ranges_str}
+    """
+
+    # Call the two-way exchange function to refine the response
+    human_readable_output = two_way_exchange("Analysis Agent", raw_message, state)
+
+    # Display the final result
+    return {"response": human_readable_output}
+
+
+def get_max_category(counts, prefix):
+    # Filter the dictionary for keys starting with the prefix
+    filtered = {k: v for k, v in counts.items() if k.startswith(prefix)}
+    if filtered:
+        # Find the key with the maximum count
+        max_key = max(filtered, key=filtered.get)
+        return max_key, filtered[max_key]
+    else:
+        return None, None
+    
+def data_preprocessing(df):
+    df.drop_duplicates(inplace = True)
+
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(df[col].median())
+        else:
+            df[col] = df[col].fillna("unknown")
+    
+    df_encoded = pd.get_dummies(df, drop_first = True)
+
+    df = df_encoded.drop(['job_unknown'], axis=1)
+    df = df_encoded.drop(['education_unknown'], axis=1)
+    df = df_encoded.drop(['contact_unknown'], axis=1)
+    df = df_encoded.drop(['poutcome_unknown'], axis=1)
+    df = df_encoded.drop(['poutcome_other'], axis=1)
+
+    return df
 
 # ----------------------------------------------------------------------
 # Agent: Data Loader – loads file and extracts basic structure.
@@ -251,20 +406,24 @@ def determine_agent(state: LLMState) -> str:
         "Available Agents:\n"
         "- data_loader_agent: For file structure analysis.\n"
         "- data_summarization_agent: For descriptive statistics and trend analysis.\n"
+        "- data_analyser_agent: For analysing and giving the output for the target audiences.\n"
         "- python_executor_agent: For dynamically generating and executing Pandas code (e.g. column relationships, success/failure rates).\n"
         "- general_ai_agent: For general conversation.\n\n"
         "Examples for guidance:\n"
         "1. Chat History: None, User Query: 'Please load my data file so I can inspect its structure.', File Available: yes → Expected: data_loader_agent\n"
         "2. Chat History: ['User uploaded file \"data.csv\".'], User Query: 'Can you provide descriptive statistics for the dataset?', File Available: yes → Expected: data_summarization_agent\n"
-        '3. Chat History: None, User Query: \'I need to analyze the relationship between the columns "age" and "income" using code.\', File Available: yes → Expected: python_executor_agent\n'
-        "4. Chat History: None, User Query: 'What is the weather like today?', File Available: no → Expected: general_ai_agent\n\n"
+        "3. Chat History: None, User Query: 'I need to analyse the data provided.', File Available: yes → Expected: data_analyser_agent\n"
+        "4. Chat History: None, User Query: 'I need to check the relationship between the columns \"age\" and \"income\" using code.', File Available: yes → Expected: python_executor_agent\n"
+        "5. Chat History: None, User Query: 'What is the weather like today?', File Available: no → Expected: general_ai_agent\n\n"
         "Respond only with the name of the agent that best suits this query."
     )
+
 
     decision = "".join(chunk.content for chunk in llm.stream(prompt)).strip().lower()
     valid_agents = {
         "data_loader_agent",
         "data_summarization_agent",
+        "data_analyser_agent",
         "python_executor_agent",
         "general_ai_agent",
     }
@@ -302,6 +461,7 @@ graph.add_node("supervisor", supervisor)
 graph.add_node("dispatcher", dispatcher)
 graph.add_node("data_loader_agent", data_loader_agent)
 graph.add_node("data_summarization_agent", data_summarization_agent)
+graph.add_node("data_analyser_agent", data_analyser_agent)
 graph.add_node("python_executor_agent", python_executor_agent)
 graph.add_node("general_ai_agent", general_ai_agent)
 
