@@ -12,12 +12,24 @@ import xgboost as xgb
 # ----------------------------------------------------------------------
 # Initialize Head LLM (Supervisor) – the "Team Lead" that coordinates outputs.
 # ----------------------------------------------------------------------
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    google_api_key="AIzaSyDrmiz2LgB8lWR1T3OmJM9kp9VnrUFIr50",
-    streaming=True,
-    temperature=0.2,
+from ollama import Client
+
+
+client = Client(
+  host='http://localhost:11434',
+  #stream=True
 )
+
+def llm(prompt: str) -> str:
+  # Send the prompt to the LLM and get the response
+    response = client.chat(model='llama3.2', messages=[
+    {
+        'role': 'user',
+        'content': prompt,
+    },
+    ])
+
+    return response["message"]["content"]
 
 # ----------------------------------------------------------------------
 # Memory Log: Store conversation history and uploaded file data.
@@ -61,9 +73,7 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
         f"Conversation context:\n{context}\n\n"
         "Provide a concise suggestion to improve or clarify this output. Respond only with the suggestion."
     )
-    suggestion = "".join(
-        chunk.content for chunk in llm.stream(suggestion_prompt)
-    ).strip()
+    suggestion = llm(prompt=suggestion_prompt)
 
     update_prompt = (
         f"You are the {agent_name} in the Smart AI Data Science Application. Your original output was:\n"
@@ -71,9 +81,7 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
         f"The head LLM suggests: {suggestion}\n\n"
         "Update your output based on this suggestion. Respond only with the revised output."
     )
-    revised_output = "".join(
-        chunk.content for chunk in llm.stream(update_prompt)
-    ).strip()
+    revised_output = llm(prompt=update_prompt)
     return revised_output
 
 def data_analyser_agent(state:LLMState):
@@ -237,11 +245,20 @@ def data_loader_agent(state: LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file uploaded. Please upload a CSV or Excel file."}
     df = state.memory["file_data"]
+
+    dtypes_df = pd.DataFrame(df.dtypes, columns=["Data Type"]).reset_index()
+    dtypes_df.rename(columns={"index": "Column Name"}, inplace=True)
+    
+    # Display the DataFrame in Streamlit
+    st.dataframe(dtypes_df)
+
     raw_output = (
         f"Loaded file: {st.session_state.memory['file_name']}\n"
         f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n"
-        f"Columns: {df.dtypes}\n"
+        f"Columns: \n"
     )
+
+   
     final_output = two_way_exchange("data_loader_agent", raw_output, state)
     return {"response": final_output}
 
@@ -287,7 +304,8 @@ def data_summarization_agent(state: LLMState):
             ax.legend()
             figure = fig
 
-    raw_output = f"Descriptive Statistics:\n{summary_stats}{trend_analysis_text}"
+    st.table(df.describe())
+    raw_output = f"Descriptive Statistics:\n{trend_analysis_text}"
     final_output = two_way_exchange("data_summarization_agent", raw_output, state)
     # Return the textual response and, if available, the figure for visualization.
     return {"response": final_output, "figure": figure}
@@ -385,7 +403,7 @@ def general_ai_agent(state: LLMState):
         f'User Query: "{state.query.strip()}"\n'
         "Provide a clear, concise answer that takes the conversation context into account."
     )
-    raw_output = "".join(chunk.content for chunk in llm.stream(prompt))
+    raw_output = llm(prompt=prompt)
     final_output = two_way_exchange("general_ai_agent", raw_output, state)
     return {"response": final_output}
 
@@ -419,7 +437,7 @@ def determine_agent(state: LLMState) -> str:
     )
 
 
-    decision = "".join(chunk.content for chunk in llm.stream(prompt)).strip().lower()
+    decision = llm(prompt=prompt).lower()
     valid_agents = {
         "data_loader_agent",
         "data_summarization_agent",
@@ -434,9 +452,7 @@ def determine_agent(state: LLMState) -> str:
         "After further analysis, confirm the final agent selection. Respond only with the final agent name."
     )
 
-    final_decision = (
-        "".join(chunk.content for chunk in llm.stream(selection_prompt)).strip().lower()
-    )
+    final_decision = llm(prompt=selection_prompt)
     return final_decision if final_decision in valid_agents else chosen_agent
 
 
