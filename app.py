@@ -92,6 +92,7 @@ def data_visualization_agent(state: LLMState):
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
     ax.set_title("Correlation Heatmap")
+    plt.show()
     buf = io.BytesIO()
     fig.savefig(buf, format='png')
     buf.seek(0)

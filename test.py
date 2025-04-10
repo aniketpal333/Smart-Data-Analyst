@@ -8,6 +8,12 @@ from langgraph.graph import StateGraph
 from pydantic import BaseModel
 from sklearn.model_selection import train_test_split
 import xgboost as xgb
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import seaborn as sns
+from sklearn.preprocessing import LabelEncoder
+
 
 # ----------------------------------------------------------------------
 # Initialize Head LLM (Supervisor) – the "Team Lead" that coordinates outputs.
@@ -60,7 +66,7 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
         f"{raw_message}\n\n"
         f"Conversation context:\n{context}\n\n"
         "Provide a concise suggestion to improve or clarify this output. Respond only with the suggestion."
-        "Remove all numerical datas and give a summarised output for the numerical datas."
+        #"Remove all numerical datas and give a summarised output for the numerical datas."
     )
     suggestion = "".join(
         chunk.content for chunk in llm.stream(suggestion_prompt)
@@ -81,10 +87,7 @@ def data_analyser_agent(state:LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file uploaded. Please upload a file for summarization."}
 
-    df = state.memory["file_data"]
-
-    # Load and analyze data
-    df = load_and_prepare_data(df)
+    df = load_and_prepare_data()
     
     # Calculate conversion ratios
     conversion_ratios = calculate_conversion_ratios(df)
@@ -103,23 +106,30 @@ def data_analyser_agent(state:LLMState):
     
     # Generate and print recommendations
     recommendations = generate_recommendations(conversion_ratios, feature_importance, target_analysis)
-    print(recommendations)
     
-    # Print model performance
-    print(f"\nXGBoost Model Accuracy: {accuracy:.2%}")
-    
-    # Print target audience insights
-    print("\nHigh-Value Target Audience Insights:")
-    print(f"Number of high-value targets: {target_analysis['total_high_value']}")
-    print(f"Conversion rate among high-value targets: {target_analysis['high_value_conversion']:.2%}")
-    
-    # Print segment insights
-    print("\nCustomer Segment Profiles:")
-    print(segment_profiles)
+    response = f"""
+    \n======== Conversion Insights ========
+    {recommendations}
 
-def load_and_prepare_data(df):
+    \n======== Model Performance ========
+    \nXGBoost Accuracy: {accuracy:.2%}
+
+    \n======== High-Value Targets ========
+    \nTotal High-Value: {target_analysis['total_high_value']}
+    \nConversion Rate: {target_analysis['high_value_conversion']:.2%}
+
+    \n======== Customer Segments ========
+    \n{segment_profiles.rename(columns={'index':'Segment'})\
+    .to_string(float_format='%.2f', header=True, index=False, \
+              col_space=18, justify='center', \
+              formatters={col: lambda x: f'{x:.2f}' for col in segment_profiles.columns})}
+    """
+    
+    return {"response": response}
+
+def load_and_prepare_data():
     # Load the marketing data
-    #df = pd.read_csv('train.csv', sep=';')
+    df = state.memory["file_data"]
 
     df = data_preprocessing(df)
         
@@ -147,13 +157,8 @@ def load_and_prepare_data(df):
 def data_preprocessing(df):
     df.drop_duplicates(inplace = True)
 
-    # Store target variable and poutcome
+    # Store target variable
     y = df['y'].copy()
-    poutcome = df['poutcome'].copy()
-
-    # Store original categorical columns needed for groupby
-    categorical_cols = ['job', 'education', 'marital', 'month']
-    original_cats = {col: df[col].copy() for col in categorical_cols}
 
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -161,37 +166,40 @@ def data_preprocessing(df):
         else:
             df[col] = df[col].fillna("unknown")
     
-    # Exclude target variable and poutcome from encoding
-    df_to_encode = df.drop(['y', 'poutcome'] + categorical_cols, axis=1)
+    # Exclude target variable from encoding
+    df_to_encode = df.drop('y', axis=1)
     df_encoded = pd.get_dummies(df_to_encode, drop_first = True)
 
     # Drop unwanted columns
+    df_encoded = df_encoded.drop(['job_unknown'], axis=1)
+    df_encoded = df_encoded.drop(['education_unknown'], axis=1)
     df_encoded = df_encoded.drop(['contact_unknown'], axis=1)
+    df_encoded = df_encoded.drop(['poutcome_unknown'], axis=1)
+    df_encoded = df_encoded.drop(['poutcome_other'], axis=1)
 
-    # Add back the original categorical columns
-    for col in categorical_cols:
-        df_encoded[col] = original_cats[col]
-
-    # Add back the target variable and poutcome
+    # Add back the target variable
     df_encoded['y'] = y
-    df_encoded['poutcome'] = poutcome
 
     return df_encoded
 
 def calculate_conversion_ratios(df):
+    # Load original data for groupby operations
+    df_original = state.memory["file_data"]
+    df_original.drop_duplicates(inplace=True)
+    
     # Calculate overall conversion ratio
     overall_ratio = (df['y'] == 'yes').mean()
     
-    # Calculate advanced conversion metrics
+    # Calculate advanced conversion metrics using original categorical columns
     conversion_by_age_group = df.groupby('age_group', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
     conversion_by_campaign = df.groupby('campaign_intensity', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_poutcome = df.groupby('poutcome', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
+    conversion_by_poutcome = df_original.groupby('poutcome')['y'].apply(lambda x: (x == 'yes').mean())
     
-    # Calculate conversion ratios by different features
-    conversion_by_job = df.groupby('job', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_education = df.groupby('education', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_marital = df.groupby('marital', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_month = df.groupby('month', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
+    # Calculate conversion ratios by different features using original categorical columns
+    conversion_by_job = df_original.groupby('job')['y'].apply(lambda x: (x == 'yes').mean())
+    conversion_by_education = df_original.groupby('education')['y'].apply(lambda x: (x == 'yes').mean())
+    conversion_by_marital = df_original.groupby('marital')['y'].apply(lambda x: (x == 'yes').mean())
+    conversion_by_month = df_original.groupby('month')['y'].apply(lambda x: (x == 'yes').mean())
     
     return {
         'overall': overall_ratio,
@@ -257,59 +265,82 @@ def perform_customer_segmentation(df):
     return segment_profiles
 
 def plot_conversion_insights(ratios, feature_importance, segment_profiles):
-    # Create figure with multiple subplots
-    fig = plt.figure(figsize=(20, 25))
-    gs = fig.add_gridspec(4, 2)
+    st.header("Conversion Analysis Dashboard")
     
-    # Plot conversion by job
-    ax1 = fig.add_subplot(gs[0, 0])
-    ratios['by_job'].sort_values().plot(kind='barh', ax=ax1)
-    ax1.set_title('Conversion Ratio by Job', fontsize=12, pad=15)
-    ax1.set_xlabel('Conversion Ratio')
+    # Create two columns for the first row
+    col1, col2 = st.columns(2)
     
-    # Plot conversion by education
-    ax2 = fig.add_subplot(gs[0, 1])
-    ratios['by_education'].sort_values().plot(kind='barh', ax=ax2)
-    ax2.set_title('Conversion Ratio by Education', fontsize=12, pad=15)
-    ax2.set_xlabel('Conversion Ratio')
+    with col1:
+        # Plot conversion by job
+        fig_job = plt.figure(figsize=(10, 6))
+        ratios['by_job'].sort_values().plot(kind='barh')
+        plt.title('Conversion Ratio by Job', fontsize=12, pad=15)
+        plt.xlabel('Conversion Ratio')
+        st.pyplot(fig_job)
+        plt.close()
     
-    # Plot conversion by month with enhanced styling
-    ax3 = fig.add_subplot(gs[1, 0])
-    month_plot = ratios['by_month'].sort_values()
-    bars = month_plot.plot(kind='barh', ax=ax3)
-    ax3.set_title('Conversion Ratio by Month', fontsize=12, pad=15)
-    ax3.set_xlabel('Conversion Ratio')
+    with col2:
+        # Plot conversion by education
+        fig_edu = plt.figure(figsize=(10, 6))
+        ratios['by_education'].sort_values().plot(kind='barh')
+        plt.title('Conversion Ratio by Education', fontsize=12, pad=15)
+        plt.xlabel('Conversion Ratio')
+        st.pyplot(fig_edu)
+        plt.close()
     
-    # Plot feature importance with enhanced styling
-    ax4 = fig.add_subplot(gs[1, 1])
-    top_features = feature_importance.head(10)
-    sns.barplot(data=top_features, y='Feature', x='Importance', ax=ax4, palette='viridis')
-    ax4.set_title('Top 10 Important Features', fontsize=12, pad=15)
+    # Create two columns for the second row
+    col3, col4 = st.columns(2)
     
-    # Plot conversion by age group with enhanced styling
-    ax5 = fig.add_subplot(gs[2, 0])
-    ratios['by_age_group'].plot(kind='barh', ax=ax5, color='skyblue')
-    ax5.set_title('Conversion Ratio by Age Group', fontsize=12, pad=15)
-    ax5.set_xlabel('Conversion Ratio')
+    with col3:
+        # Plot conversion by month
+        fig_month = plt.figure(figsize=(10, 6))
+        month_plot = ratios['by_month'].sort_values()
+        month_plot.plot(kind='barh')
+        plt.title('Conversion Ratio by Month', fontsize=12, pad=15)
+        plt.xlabel('Conversion Ratio')
+        st.pyplot(fig_month)
+        plt.close()
     
-    # Plot segment profiles with enhanced styling
-    ax6 = fig.add_subplot(gs[2, 1])
-    segment_profiles['y'].plot(kind='bar', ax=ax6, color='lightgreen')
-    ax6.set_title('Conversion Ratio by Customer Segment', fontsize=12, pad=15)
-    ax6.set_xlabel('Segment')
-    ax6.set_ylabel('Conversion Ratio')
+    with col4:
+        # Plot feature importance
+        fig_feat = plt.figure(figsize=(10, 6))
+        top_features = feature_importance.head(10)
+        sns.barplot(data=top_features, y='Feature', x='Importance', palette='viridis')
+        plt.title('Top 10 Important Features', fontsize=12, pad=15)
+        st.pyplot(fig_feat)
+        plt.close()
     
-    # Add correlation heatmap for numerical features
-    ax7 = fig.add_subplot(gs[3, :])
+    # Create two columns for the third row
+    col5, col6 = st.columns(2)
+    
+    with col5:
+        # Plot conversion by age group
+        fig_age = plt.figure(figsize=(10, 6))
+        ratios['by_age_group'].plot(kind='barh', color='skyblue')
+        plt.title('Conversion Ratio by Age Group', fontsize=12, pad=15)
+        plt.xlabel('Conversion Ratio')
+        st.pyplot(fig_age)
+        plt.close()
+    
+    with col6:
+        # Plot segment profiles
+        fig_seg = plt.figure(figsize=(10, 6))
+        segment_profiles['y'].plot(kind='bar', color='lightgreen')
+        plt.title('Conversion Ratio by Customer Segment', fontsize=12, pad=15)
+        plt.xlabel('Segment')
+        plt.ylabel('Conversion Ratio')
+        st.pyplot(fig_seg)
+        plt.close()
+    
+    # Create correlation heatmap in full width
+    st.subheader("Correlation Analysis")
+    fig_corr = plt.figure(figsize=(12, 8))
     df = load_and_prepare_data()
     numerical_cols = ['age', 'balance', 'day', 'duration', 'campaign', 'pdays', 'previous']
     correlation_matrix = df[numerical_cols].corr()
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, ax=ax7)
-    ax7.set_title('Correlation Heatmap of Numerical Features', fontsize=12, pad=15)
-    
-    # Adjust layout and save
-    plt.tight_layout()
-    plt.savefig('conversion_analysis.png', dpi=300, bbox_inches='tight')
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0)
+    plt.title('Correlation Heatmap of Numerical Features', fontsize=12, pad=15)
+    st.pyplot(fig_corr)
     plt.close()
 
 def analyze_target_audience(df, xgb_model, X_test, y_test, y_prob):
@@ -338,20 +369,20 @@ def analyze_target_audience(df, xgb_model, X_test, y_test, y_prob):
 
 def generate_recommendations(ratios, feature_importance, target_analysis):
     recommendations = [
-        "Key findings and recommendations:",
+        "\nKey findings and recommendations:",
         f"1. Overall conversion rate: {ratios['overall']:.2%}",
         "\nTop performing segments:",
-        f"2. Best performing job category: {ratios['by_job'].idxmax()} ({ratios['by_job'].max():.2%})",
-        f"3. Best performing education level: {ratios['by_education'].idxmax()} ({ratios['by_education'].max():.2%})",
-        f"4. Best performing month: {ratios['by_month'].idxmax()} ({ratios['by_month'].max():.2%})",
+        f"\n2. Best performing job category: {ratios['by_job'].idxmax()} ({ratios['by_job'].max():.2%})",
+        f"\n3. Best performing education level: {ratios['by_education'].idxmax()} ({ratios['by_education'].max():.2%})",
+        f"\n4. Best performing month: {ratios['by_month'].idxmax()} ({ratios['by_month'].max():.2%})",
         "\nHigh-Value Target Audience Insights:",
-        f"5. Identified {target_analysis['total_high_value']} high-potential customers",
-        f"6. High-value segment conversion rate: {target_analysis['high_value_conversion']:.2%}",
+        f"\n5. Identified {target_analysis['total_high_value']} high-potential customers",
+        f"\n6. High-value segment conversion rate: {target_analysis['high_value_conversion']:.2%}",
         "\nRecommendations for maximizing conversion:",
-        f"7. Focus on top 3 predictive features: {', '.join(feature_importance['Feature'].head(3))}",
-        "8. Target marketing campaigns during high-performing months",
-        "9. Prioritize high-value segments with personalized approaches",
-        "10. Leverage XGBoost predictions for lead scoring and prioritization"
+        f"\n7. Focus on top 3 predictive features: {', '.join(feature_importance['Feature'].head(3))}",
+        "\n8. Target marketing campaigns during high-performing months",
+        "\n9. Prioritize high-value segments with personalized approaches",
+        "\n10. Leverage XGBoost predictions for lead scoring and prioritization"
     ]
     return '\n'.join(recommendations)
 
@@ -482,24 +513,34 @@ def generate_recommendations(ratios, feature_importance, target_analysis):
 #     else:
 #         return None, None
     
-def data_preprocessing(df):
-    df.drop_duplicates(inplace = True)
+# def data_preprocessing(df):
+#     df.drop_duplicates(inplace = True)
 
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = df[col].fillna(df[col].median())
-        else:
-            df[col] = df[col].fillna("unknown")
+#     # Store target variable before preprocessing
+#     y = df['y'].copy()
+
+#     # Handle missing values
+#     for col in df.columns:
+#         if pd.api.types.is_numeric_dtype(df[col]):
+#             df[col] = df[col].fillna(df[col].median())
+#         else:
+#             if pd.api.types.is_categorical_dtype(df[col]):
+#                 df[col] = df[col].cat.add_categories(['unknown']).fillna('unknown')
+#             else:
+#                 df[col] = df[col].fillna("unknown")
     
-    df_encoded = pd.get_dummies(df, drop_first = True)
+#     # Encode all columns except target variable
+#     df_to_encode = df.drop('y', axis=1)
+#     df_encoded = pd.get_dummies(df_to_encode)
 
-    df = df_encoded.drop(['job_unknown'], axis=1)
-    df = df_encoded.drop(['education_unknown'], axis=1)
-    df = df_encoded.drop(['contact_unknown'], axis=1)
-    df = df_encoded.drop(['poutcome_unknown'], axis=1)
-    df = df_encoded.drop(['poutcome_other'], axis=1)
+#     # Add back the target variable
+#     df_encoded['y'] = y
 
-    return df
+#     # Ensure target variable is preserved
+#     if 'y' not in df_encoded.columns:
+#         raise ValueError("Target variable 'y' was lost during preprocessing")
+
+#     return df_encoded
 
 # ----------------------------------------------------------------------
 # Agent: Data Loader – loads file and extracts basic structure.
