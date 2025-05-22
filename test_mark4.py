@@ -2,6 +2,7 @@ import io
 import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
+import numpy as np
 from typing import Optional, Any, Dict, List
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph
@@ -13,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 import seaborn as sns
 from sklearn.preprocessing import LabelEncoder
-
+from sklearn.impute import SimpleImputer
 
 # ----------------------------------------------------------------------
 # Initialize Head LLM (Supervisor) – the "Team Lead" that coordinates outputs.
@@ -83,30 +84,123 @@ def two_way_exchange(agent_name: str, raw_message: str, state: LLMState) -> str:
     ).strip()
     return revised_output
 
+def analyze_dataset_structure(df):
+    # First check if 'y' column exists and is binary
+    if 'y' in df.columns and df['y'].nunique() <= 2:
+        unique_vals = df['y'].unique()
+        if 'yes' in unique_vals or 'Yes' in unique_vals:
+            return 'y', 'yes' if 'yes' in unique_vals else 'Yes'
+        elif 1 in unique_vals or True in unique_vals:
+            return 'y', 1 if 1 in unique_vals else True
+        else:
+            return 'y', unique_vals[-1]
+    
+    # Look for other binary columns with common target names
+    target_names = ['response', 'target', 'outcome', 'label', 'class']
+    for col in df.columns:
+        if df[col].nunique() <= 2 and any(name in col.lower() for name in target_names):
+            unique_vals = df[col].unique()
+            if 'yes' in unique_vals or 'Yes' in unique_vals:
+                return col, 'yes' if 'yes' in unique_vals else 'Yes'
+            elif 1 in unique_vals or True in unique_vals:
+                return col, 1 if 1 in unique_vals else True
+            else:
+                return col, unique_vals[-1]
+    
+    # If no suitable binary column found, analyze using LLM
+    df_info = df.info(buf=io.StringIO(), show_counts=True)
+    df_sample = df.head().to_string()
+    
+    analysis_prompt = f"""Analyze this dataset and identify:
+    1. The target/dependent variable (binary classification column)
+    2. The positive class value in the target variable
+
+    Some common target column names can be y, response, target, outcome, etc.
+    So try to choose target column names like these from the given dataset...
+
+    Dataset Info:
+    {df_info}
+
+    Sample Data:
+    {df_sample}
+
+    Respond in JSON format only:
+    {{
+        "target_column": "column_name",
+        "positive_class": "value"
+    }}
+    """
+    
+    analysis = llm.invoke(analysis_prompt)
+    try:
+        result = eval(analysis)
+        return result["target_column"], result["positive_class"]
+    except:
+        return 'y', 'yes'  # Default fallback values
+
+def initialize_target_info(df):
+    # Clear existing target_info to ensure fresh detection
+    if "target_info" in st.session_state:
+        del st.session_state.target_info
+    
+    # Analyze and set new target info
+    target_column, positive_class = analyze_dataset_structure(df)
+    st.session_state.target_info = {
+        "target_column": target_column,
+        "positive_class": positive_class
+    }
+
 def data_analyser_agent(state:LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file uploaded. Please upload a file for summarization."}
 
+    # Initialize target info before data preprocessing
+    initialize_target_info(state.memory["file_data"])
+    
+    # Load and prepare data
     df = load_and_prepare_data()
     
-    # Calculate conversion ratios
-    conversion_ratios = calculate_conversion_ratios(df)
+    # Get or set target column and positive class
+    if "target_info" not in st.session_state:
+        target_column, positive_class = analyze_dataset_structure(state.memory["file_data"], state)
+        st.session_state.target_info = {
+            "target_column": target_column,
+            "positive_class": positive_class
+        }
     
-    # Analyze feature importance and get XGBoost predictions
-    feature_importance, xgb_model, accuracy, X_test, y_test, y_prob = analyze_feature_importance(df)
+    target_column = st.session_state.target_info["target_column"]
+    positive_class = st.session_state.target_info["positive_class"]
     
-    # Analyze target audience
-    target_analysis = analyze_target_audience(df, xgb_model, X_test, y_test, y_prob)
+    # Check for derived features
+    derived_features = {}
+    if 'age_group' in df.columns:
+        derived_features['age_group'] = 'age_group'
+    if 'campaign_intensity' in df.columns:
+        derived_features['campaign_intensity'] = 'campaign_intensity'
     
-    # Perform customer segmentation
-    segment_profiles = perform_customer_segmentation(df)
+    # Calculate conversion ratios with dynamic parameters
+    conversion_ratios = calculate_conversion_ratios(df, target_column, positive_class, derived_features)
     
-    # Generate visualizations
-    plot_conversion_insights(conversion_ratios, feature_importance, segment_profiles)
+    # Analyze feature importance with dynamic parameters
+    feature_importance, xgb_model, accuracy, X_test, y_test, y_prob = analyze_feature_importance(df, target_column, positive_class)
     
-    # Generate and print recommendations
-    recommendations = generate_recommendations(conversion_ratios, feature_importance, target_analysis)
+    # Analyze target audience with dynamic parameters
+    target_analysis = analyze_target_audience(df, xgb_model, X_test, y_test, y_prob, probability_threshold=0.7)
     
+    # Identify numerical columns for segmentation
+    numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+    numerical_cols = [col for col in numerical_cols if col != target_column and col != 'segment']
+    
+    # Perform customer segmentation with dynamic parameters
+    segment_profiles = perform_customer_segmentation(df, target_column, positive_class, n_clusters=4, features=numerical_cols[:4] if len(numerical_cols) > 4 else numerical_cols)
+    
+    # Generate visualizations with dynamic parameters
+    plot_conversion_insights(conversion_ratios, feature_importance, segment_profiles, target_column, numerical_cols)
+    
+    # Generate recommendations with dynamic parameters
+    recommendations = generate_recommendations(conversion_ratios, feature_importance, target_analysis, target_column)
+    
+    # Format the response
     response = f"""
     \n======== Conversion Insights ========
     {recommendations}
@@ -119,10 +213,10 @@ def data_analyser_agent(state:LLMState):
     \nConversion Rate: {target_analysis['high_value_conversion']:.2%}
 
     \n======== Customer Segments ========
-    \n{segment_profiles.rename(columns={'index':'Segment'})\
-    .to_string(float_format='%.2f', header=True, index=False, \
-              col_space=18, justify='center', \
-              formatters={col: lambda x: f'{x:.2f}' for col in segment_profiles.columns})}
+    \n{segment_profiles.rename(columns={'index':'Segment'}).to_string(float_format='%.2f', header=True, index=False, col_space=18, justify='center', formatters={col: lambda x: f'{x:.2f}' for col in segment_profiles.columns}) if not segment_profiles.empty else 'No segment profiles available'}
+
+    \n======== Target Column Information ========
+    \nTarget Column: {target_column}
     """
     
     return {"response": response}
@@ -134,30 +228,56 @@ def load_and_prepare_data():
     df = data_preprocessing(df)
         
     # Convert date-related features
-    df['age_group'] = pd.qcut(df['age'], q=4, labels=['Young', 'Adult', 'Middle-aged', 'Senior'])
+    # df['age_group'] = pd.qcut(df['age'], q=4, labels=['Young', 'Adult', 'Middle-aged', 'Senior'])
     
-    # Create campaign intensity using fixed-width bins
-    campaign_min = df['campaign'].min()
-    campaign_max = df['campaign'].max()
-    campaign_range = campaign_max - campaign_min
-    campaign_step = campaign_range / 3
+    # # Create campaign intensity using fixed-width bins
+    # campaign_min = df['campaign'].min()
+    # campaign_max = df['campaign'].max()
+    # campaign_range = campaign_max - campaign_min
+    # campaign_step = campaign_range / 3
     
-    campaign_bins = [campaign_min, 
-                    campaign_min + campaign_step,
-                    campaign_min + 2 * campaign_step,
-                    campaign_max]
+    # campaign_bins = [campaign_min, 
+    #                 campaign_min + campaign_step,
+    #                 campaign_min + 2 * campaign_step,
+    #                 campaign_max]
     
-    df['campaign_intensity'] = pd.cut(df['campaign'], 
-                                     bins=campaign_bins, 
-                                     labels=['Low', 'Medium', 'High'],
-                                     include_lowest=True)
+    # df['campaign_intensity'] = pd.cut(df['campaign'], 
+    #                                  bins=campaign_bins, 
+    #                                  labels=['Low', 'Medium', 'High'],
+    #                                  include_lowest=True)
     
     return df
 
-def data_preprocessing(df, target_column='y'):
+def data_preprocessing(df):
     df = df.copy()
     df.drop_duplicates(inplace=True)
 
+    # Initialize target info if not already set
+    if "target_info" not in st.session_state:
+        target_column, positive_class = analyze_dataset_structure(df)
+        st.session_state.target_info = {
+            "target_column": target_column,
+            "positive_class": positive_class
+        }
+    
+    target_column = st.session_state.target_info["target_column"]
+    
+    # Ensure target column exists in the DataFrame
+    if target_column not in df.columns:
+        # Look for common binary target columns
+        binary_cols = [col for col in df.columns if df[col].nunique() <= 2]
+        if binary_cols:
+            target_column = binary_cols[0]  # Use the first binary column found
+            st.session_state.target_info["target_column"] = target_column
+            # Update positive class based on the new target column
+            unique_vals = df[target_column].unique()
+            if 1 in unique_vals or True in unique_vals:
+                st.session_state.target_info["positive_class"] = 1 if 1 in unique_vals else True
+            elif 'yes' in unique_vals or 'Yes' in unique_vals:
+                st.session_state.target_info["positive_class"] = 'yes' if 'yes' in unique_vals else 'Yes'
+            else:
+                st.session_state.target_info["positive_class"] = unique_vals[-1]
+    
     # Store target variable
     y = df[target_column].copy()
 
@@ -181,51 +301,98 @@ def data_preprocessing(df, target_column='y'):
 
     return df_encoded
 
-def calculate_conversion_ratios(df):
+def calculate_conversion_ratios(df, target_column=None, positive_class=None, derived_features=None):
+    """Calculate conversion ratios for different features in the dataset.
+    
+    Args:
+        df: Processed DataFrame
+        target_column: Name of the target column
+        positive_class: Value in target column that represents a positive outcome
+        derived_features: Dictionary of derived feature names (e.g., {'age_group': 'age_group'})
+    
+    Returns:
+        Dictionary of conversion ratios by different features
+    """
+    # Get target info from session state
+    if target_column is None or positive_class is None:
+        target_column = st.session_state.target_info["target_column"]
+        positive_class = st.session_state.target_info["positive_class"]
     # Load original data for groupby operations
     df_original = state.memory["file_data"]
     df_original.drop_duplicates(inplace=True)
     
     # Calculate overall conversion ratio
-    overall_ratio = (df['y'] == 'yes').mean()
+    overall_ratio = (df[target_column] == positive_class).mean()
     
-    # Calculate advanced conversion metrics using original categorical columns
-    conversion_by_age_group = df.groupby('age_group', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_campaign = df.groupby('campaign_intensity', observed=True)['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_poutcome = df_original.groupby('poutcome')['y'].apply(lambda x: (x == 'yes').mean())
+    # Initialize results dictionary
+    results = {'overall': overall_ratio}
     
-    # Calculate conversion ratios by different features using original categorical columns
-    conversion_by_job = df_original.groupby('job')['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_education = df_original.groupby('education')['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_marital = df_original.groupby('marital')['y'].apply(lambda x: (x == 'yes').mean())
-    conversion_by_month = df_original.groupby('month')['y'].apply(lambda x: (x == 'yes').mean())
+    # Handle derived features if they exist
+    if derived_features is not None and isinstance(derived_features, dict):
+        for feature_name, column_name in derived_features.items():
+            if column_name in df.columns:
+                try:
+                    results[f'by_{feature_name}'] = df.groupby(column_name, observed=True)[target_column].apply(
+                        lambda x: (x == positive_class).mean()
+                    )
+                except Exception:
+                    # Skip if groupby fails
+                    pass
     
-    return {
-        'overall': overall_ratio,
-        'by_job': conversion_by_job,
-        'by_education': conversion_by_education,
-        'by_marital': conversion_by_marital,
-        'by_month': conversion_by_month,
-        'by_age_group': conversion_by_age_group,
-        'by_campaign': conversion_by_campaign,
-        'by_poutcome': conversion_by_poutcome
-    }
+    # Identify categorical columns in original data for groupby operations
+    categorical_cols = df_original.select_dtypes(include=['object', 'category']).columns
+    
+    # Calculate conversion ratios for each categorical column
+    for col in categorical_cols:
+        if col != target_column and col in df_original.columns:
+            try:
+                results[f'by_{col}'] = df_original.groupby(col)[target_column].apply(
+                    lambda x: (x == positive_class).mean()
+                )
+            except Exception:
+                # Skip if groupby fails
+                pass
+    
+    return results
 
-def analyze_feature_importance(df):
+def analyze_feature_importance(df, target_column=None, positive_class=None, model_params=None):
+    """
+    Analyze feature importance using XGBoost model.
+    
+    Args:
+        df: Processed DataFrame
+        target_column: Name of the target column
+        positive_class: Value in target column that represents a positive outcome
+        model_params: Dictionary of XGBoost model parameters
+        
+    Returns:
+        Tuple of (feature_importance, xgb_model, accuracy, X_test, y_test, y_prob)
+    """
+    # Get target info from session state
+    if target_column is None or positive_class is None:
+        target_column = st.session_state.target_info["target_column"]
+        positive_class = st.session_state.target_info["positive_class"]
     # Prepare data for modeling
-    X = pd.get_dummies(df.drop('y', axis=1))
-    y = (df['y'] == 'yes').astype(int)
+    X = pd.get_dummies(df.drop(target_column, axis=1))
+    y = (df[target_column] == positive_class).astype(int)
     
     # Split the data
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
+    # Set default model parameters
+    default_params = {
+        'n_estimators': 100,
+        'learning_rate': 0.1,
+        'max_depth': 5,
+        'random_state': 42
+    }
+    
+    # Update with custom parameters if provided
+    if model_params and isinstance(model_params, dict):
+        default_params.update(model_params)
+    
     # Train XGBoost model
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=100,
-        learning_rate=0.1,
-        max_depth=5,
-        random_state=42
-    )
+    xgb_model = xgb.XGBClassifier(**default_params)
     xgb_model.fit(X_train, y_train)
     
     # Get predictions and probabilities
@@ -243,114 +410,235 @@ def analyze_feature_importance(df):
     
     return feature_importance, xgb_model, accuracy, X_test, y_test, y_prob
 
-def perform_customer_segmentation(df):
-    # Prepare numerical features for clustering
-    cluster_features = ['age', 'balance', 'campaign', 'previous']
-    X_cluster = StandardScaler().fit_transform(df[cluster_features])
+def perform_customer_segmentation(df, target_column=None, positive_class=None, n_clusters=4, features=None):
+    """
+    Perform customer segmentation using KMeans clustering.
+    
+    Args:
+        df: Processed DataFrame
+        target_column: Name of the target column
+        positive_class: Value in target column that represents a positive outcome
+        n_clusters: Number of clusters to create
+        features: List of numerical features to use for clustering
+        
+    Returns:
+        DataFrame with segment profiles
+    """
+    # Get target info from session state
+    if target_column is None or positive_class is None:
+        target_column = st.session_state.target_info["target_column"]
+        positive_class = st.session_state.target_info["positive_class"]
+    # Dynamically identify numerical features if not provided
+    if features is None:
+        # Get numerical columns, excluding the target
+        numerical_cols = df.select_dtypes(include=['number']).columns
+        features = [col for col in numerical_cols if col != target_column and col != 'segment']
+        
+        # If we have too many features, select top ones by variance
+        if len(features) > 5:
+            # Select top 4 features by variance
+            variances = df[features].var()
+            features = variances.nlargest(4).index.tolist()
+    
+    # Ensure we have valid features
+    valid_features = [f for f in features if f in df.columns]
+    if not valid_features:
+        # Fallback to basic numerical features if available
+        for basic_feature in ['age', 'balance', 'amount', 'duration', 'income']:
+            if basic_feature in df.columns and pd.api.types.is_numeric_dtype(df[basic_feature]):
+                valid_features.append(basic_feature)
+                if len(valid_features) >= 3:
+                    break
+    
+    # If still no valid features, return empty DataFrame
+    if not valid_features:
+        return pd.DataFrame()
+    
+    # Prepare features for clustering
+    X_cluster = StandardScaler().fit_transform(df[valid_features])
     
     # Find optimal number of clusters
-    n_clusters = 4  # You can make this dynamic based on silhouette score
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    df = df.copy()  # Create a copy to avoid modifying the original
     df['segment'] = kmeans.fit_predict(X_cluster)
     
     # Calculate segment characteristics
-    segment_profiles = df.groupby('segment').agg({
-        'age': 'mean',
-        'balance': 'mean',
-        'campaign': 'mean',
-        'y': lambda x: (x == 'yes').mean()
-    }).round(2)
+    agg_dict = {feature: 'mean' for feature in valid_features}
+    agg_dict[target_column] = lambda x: (x == positive_class).mean()
+    
+    segment_profiles = df.groupby('segment').agg(agg_dict).round(2)
     
     return segment_profiles
 
-def plot_conversion_insights(ratios, feature_importance, segment_profiles):
+def plot_conversion_insights(ratios, feature_importance, segment_profiles, target_column=None, numerical_cols=None):
+    """
+    Plot conversion insights using Streamlit.
+    
+    Args:
+        ratios: Dictionary of conversion ratios
+        feature_importance: DataFrame with feature importance
+        segment_profiles: DataFrame with segment profiles
+        target_column: Name of the target column
+        numerical_cols: List of numerical columns for correlation analysis
+    """
+    # Get target info from session state
+    if target_column is None:
+        target_column = st.session_state.target_info["target_column"]
     st.header("Conversion Analysis Dashboard")
     
     # Create two columns for the first row
     col1, col2 = st.columns(2)
     
-    with col1:
-        # Plot conversion by job
-        fig_job = plt.figure(figsize=(10, 6))
-        ratios['by_job'].sort_values().plot(kind='barh')
-        plt.title('Conversion Ratio by Job', fontsize=12, pad=15)
-        plt.xlabel('Conversion Ratio')
-        st.pyplot(fig_job)
-        plt.close()
+    # Dynamically select top categorical features to plot
+    categorical_plots = []
+    for key, value in ratios.items():
+        if key.startswith('by_') and not value.empty and len(value) > 1:
+            # Limit to top 10 categories by conversion ratio
+            value = value.sort_values(ascending=False).head(10)
+            categorical_plots.append((key, value))
     
-    with col2:
-        # Plot conversion by education
-        fig_edu = plt.figure(figsize=(10, 6))
-        ratios['by_education'].sort_values().plot(kind='barh')
-        plt.title('Conversion Ratio by Education', fontsize=12, pad=15)
-        plt.xlabel('Conversion Ratio')
-        st.pyplot(fig_edu)
-        plt.close()
+    # Ensure we have at least some plots
+    if not categorical_plots:
+        st.write("No categorical features available for plotting")
+        return
+    
+    # Plot first categorical feature
+    if len(categorical_plots) > 0:
+        with col1:
+            key, value = categorical_plots[0]
+            category_name = key[3:].replace('_', ' ').title()
+            fig = plt.figure(figsize=(10, 6))
+            value.sort_values().plot(kind='barh')
+            plt.title(f'Conversion Ratio by {category_name} (Top 10)', fontsize=12, pad=15)
+            plt.xlabel('Conversion Ratio')
+            st.pyplot(fig)
+            plt.close()
+    
+    # Plot second categorical feature if available
+    if len(categorical_plots) > 1:
+        with col2:
+            key, value = categorical_plots[1]
+            category_name = key[3:].replace('_', ' ').title()
+            fig = plt.figure(figsize=(10, 6))
+            value.sort_values().plot(kind='barh')
+            plt.title(f'Conversion Ratio by {category_name}', fontsize=12, pad=15)
+            plt.xlabel('Conversion Ratio')
+            st.pyplot(fig)
+            plt.close()
     
     # Create two columns for the second row
     col3, col4 = st.columns(2)
     
-    with col3:
-        # Plot conversion by month
-        fig_month = plt.figure(figsize=(10, 6))
-        month_plot = ratios['by_month'].sort_values()
-        month_plot.plot(kind='barh')
-        plt.title('Conversion Ratio by Month', fontsize=12, pad=15)
-        plt.xlabel('Conversion Ratio')
-        st.pyplot(fig_month)
-        plt.close()
+    # Plot third categorical feature if available
+    if len(categorical_plots) > 2:
+        with col3:
+            key, value = categorical_plots[2]
+            category_name = key[3:].replace('_', ' ').title()
+            fig = plt.figure(figsize=(10, 6))
+            value.sort_values().plot(kind='barh')
+            plt.title(f'Conversion Ratio by {category_name}', fontsize=12, pad=15)
+            plt.xlabel('Conversion Ratio')
+            st.pyplot(fig)
+            plt.close()
     
-    with col4:
-        # Plot feature importance
-        fig_feat = plt.figure(figsize=(10, 6))
-        top_features = feature_importance.head(10)
-        sns.barplot(data=top_features, y='Feature', x='Importance', palette='viridis')
-        plt.title('Top 10 Important Features', fontsize=12, pad=15)
-        st.pyplot(fig_feat)
-        plt.close()
+    # Plot feature importance
+    with col4 if len(categorical_plots) > 2 else col3:
+        if not feature_importance.empty and 'Feature' in feature_importance.columns:
+            fig = plt.figure(figsize=(10, 6))
+            top_features = feature_importance.head(10)
+            sns.barplot(data=top_features, y='Feature', x='Importance', palette='viridis')
+            plt.title('Top 10 Important Features', fontsize=12, pad=15)
+            st.pyplot(fig)
+            plt.close()
+        else:
+            st.write("Feature importance data not available")
     
-    # Create two columns for the third row
-    col5, col6 = st.columns(2)
-    
-    with col5:
-        # Plot conversion by age group
-        fig_age = plt.figure(figsize=(10, 6))
-        ratios['by_age_group'].plot(kind='barh', color='skyblue')
-        plt.title('Conversion Ratio by Age Group', fontsize=12, pad=15)
-        plt.xlabel('Conversion Ratio')
-        st.pyplot(fig_age)
-        plt.close()
-    
-    with col6:
+    # Create two columns for the third row if we have segment data
+    if not segment_profiles.empty and target_column in segment_profiles.columns:
+        col5, col6 = st.columns(2)
+        
+        # Plot derived features if available
+        derived_feature_plotted = False
+        for key in ratios.keys():
+            if key.startswith('by_') and key not in [plot[0] for plot in categorical_plots[:3]]:
+                with col5:
+                    if not ratios[key].empty:
+                        fig = plt.figure(figsize=(10, 6))
+                        ratios[key].plot(kind='barh', color='skyblue')
+                        category_name = key[3:].replace('_', ' ').title()
+                        plt.title(f'Conversion Ratio by {category_name}', fontsize=12, pad=15)
+                        plt.xlabel('Conversion Ratio')
+                        st.pyplot(fig)
+                        plt.close()
+                        derived_feature_plotted = True
+                        break
+        
         # Plot segment profiles
-        fig_seg = plt.figure(figsize=(10, 6))
-        segment_profiles['y'].plot(kind='bar', color='lightgreen')
-        plt.title('Conversion Ratio by Customer Segment', fontsize=12, pad=15)
-        plt.xlabel('Segment')
-        plt.ylabel('Conversion Ratio')
-        st.pyplot(fig_seg)
-        plt.close()
+        with col6 if derived_feature_plotted else col5:
+            fig = plt.figure(figsize=(10, 6))
+            segment_profiles[target_column].plot(kind='bar', color='lightgreen')
+            plt.title('Conversion Ratio by Customer Segment', fontsize=12, pad=15)
+            plt.xlabel('Segment')
+            plt.ylabel('Conversion Ratio')
+            st.pyplot(fig)
+            plt.close()
     
     # Create correlation heatmap in full width
     st.subheader("Correlation Analysis")
     fig_corr = plt.figure(figsize=(12, 8))
+    
+    # Get the data
     df = load_and_prepare_data()
-    numerical_cols = ['age', 'balance', 'day', 'duration', 'campaign', 'pdays', 'previous']
-    correlation_matrix = df[numerical_cols].corr()
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0)
-    plt.title('Correlation Heatmap of Numerical Features', fontsize=12, pad=15)
-    st.pyplot(fig_corr)
+    
+    # Dynamically identify numerical columns if not provided
+    if numerical_cols is None:
+        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+        # Exclude target if it's numerical and any segment column
+        numerical_cols = [col for col in numerical_cols if col != target_column and col != 'segment']
+        # Limit to top 7 columns to avoid overcrowding
+        if len(numerical_cols) > 7:
+            numerical_cols = numerical_cols[:7]
+    
+    # Ensure we have valid numerical columns
+    valid_num_cols = [col for col in numerical_cols if col in df.columns]
+    
+    if valid_num_cols:
+        correlation_matrix = df[valid_num_cols].corr()
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0)
+        plt.title('Correlation Heatmap of Numerical Features', fontsize=12, pad=15)
+        st.pyplot(fig_corr)
+    else:
+        st.write("No numerical columns available for correlation analysis")
+    
     plt.close()
 
-def analyze_target_audience(df, xgb_model, X_test, y_test, y_prob):
+def analyze_target_audience(df, xgb_model, X_test, y_test, y_prob, probability_threshold=0.7):
+    """
+    Analyze high-value target audience based on prediction probabilities.
+    
+    Args:
+        df: Processed DataFrame
+        xgb_model: Trained XGBoost model
+        X_test: Test features
+        y_test: Test target values
+        y_prob: Prediction probabilities
+        probability_threshold: Threshold to define high-value targets
+        
+    Returns:
+        Dictionary with high-value target analysis
+    """
+    # Get target column and positive class from session state
+    target_column = st.session_state.target_info["target_column"]
+    positive_class = st.session_state.target_info["positive_class"]
+    
     # Create target audience segments based on prediction probability
     prediction_df = pd.DataFrame({
         'Actual': y_test,
         'Probability': y_prob
     }, index=X_test.index)
     
-    # Define high-value targets (probability > 0.7)
-    high_value_mask = prediction_df['Probability'] > 0.7
+    # Define high-value targets based on threshold
+    high_value_mask = prediction_df['Probability'] > probability_threshold
     high_value_features = X_test[high_value_mask]
     high_value_predictions = prediction_df[high_value_mask]
     
@@ -360,29 +648,91 @@ def analyze_target_audience(df, xgb_model, X_test, y_test, y_prob):
     # Calculate conversion rate for high-value targets
     high_value_conversion = high_value_predictions['Actual'].mean() if not high_value_predictions.empty else 0
     
-    return {
+    # Calculate additional metrics if possible
+    metrics = {
         'high_value_profile': high_value_profile,
         'high_value_conversion': high_value_conversion,
-        'total_high_value': len(high_value_features)
+        'total_high_value': len(high_value_features),
+        'percentage_high_value': len(high_value_features) / len(X_test) if len(X_test) > 0 else 0
     }
+    
+    return metrics
 
-def generate_recommendations(ratios, feature_importance, target_analysis):
+def generate_recommendations(ratios, feature_importance, target_analysis, target_column):
+    """
+    Generate recommendations based on analysis results.
+    
+    Args:
+        ratios: Dictionary of conversion ratios
+        feature_importance: DataFrame with feature importance
+        target_analysis: Dictionary with target audience analysis
+        target_column: Name of the target column
+        
+    Returns:
+        String with recommendations
+    """
+    # Get target column and positive class from session state
+    target_column = st.session_state.target_info["target_column"]
+    positive_class = st.session_state.target_info["positive_class"]
+    
     recommendations = [
         "\nKey findings and recommendations:",
-        f"1. Overall conversion rate: {ratios['overall']:.2%}",
-        "\nTop performing segments:",
-        f"\n2. Best performing job category: {ratios['by_job'].idxmax()} ({ratios['by_job'].max():.2%})",
-        f"\n3. Best performing education level: {ratios['by_education'].idxmax()} ({ratios['by_education'].max():.2%})",
-        f"\n4. Best performing month: {ratios['by_month'].idxmax()} ({ratios['by_month'].max():.2%})",
-        "\nHigh-Value Target Audience Insights:",
-        f"\n5. Identified {target_analysis['total_high_value']} high-potential customers",
-        f"\n6. High-value segment conversion rate: {target_analysis['high_value_conversion']:.2%}",
-        "\nRecommendations for maximizing conversion:",
-        f"\n7. Focus on top 3 predictive features: {', '.join(feature_importance['Feature'].head(3))}",
-        "\n8. Target marketing campaigns during high-performing months",
-        "\n9. Prioritize high-value segments with personalized approaches",
-        "\n10. Leverage XGBoost predictions for lead scoring and prioritization"
+        f"1. Overall {target_column} rate: {ratios['overall']:.2%}"
     ]
+    
+    # Add top performing segments if available
+    segment_insights = []
+    segment_count = 2  # Start counter for recommendation numbering
+    
+    # Dynamically add insights for each categorical feature
+    for key, value in ratios.items():
+        if key.startswith('by_') and not value.empty:
+            try:
+                category_name = key[3:]  # Remove 'by_' prefix
+                best_category = value.idxmax()
+                best_rate = value.max()
+                segment_insights.append(
+                    f"\n{segment_count}. Best performing {category_name}: {best_category} ({best_rate:.2%})"
+                )
+                segment_count += 1
+                
+                # Limit to top 3 segment insights
+                if len(segment_insights) >= 3:
+                    break
+            except Exception:
+                # Skip if there's an error getting max value
+                continue
+    
+    if segment_insights:
+        recommendations.append("\nTop performing segments:")
+        recommendations.extend(segment_insights)
+    
+    # Add high-value audience insights if available
+    if target_analysis and 'total_high_value' in target_analysis:
+        recommendations.append("\nHigh-Value Target Audience Insights:")
+        recommendations.append(f"\n{segment_count}. Identified {target_analysis['total_high_value']} high-potential customers")
+        segment_count += 1
+        
+        if 'high_value_conversion' in target_analysis:
+            recommendations.append(f"\n{segment_count}. High-value segment conversion rate: {target_analysis['high_value_conversion']:.2%}")
+            segment_count += 1
+    
+    # Add feature recommendations if available
+    recommendations.append("\nRecommendations for maximizing conversion:")
+    
+    if not feature_importance.empty and 'Feature' in feature_importance.columns:
+        top_features = feature_importance['Feature'].head(3).tolist()
+        if top_features:
+            recommendations.append(f"\n{segment_count}. Focus on top {len(top_features)} predictive features: {', '.join(top_features)}")
+            segment_count += 1
+    
+    # Add general recommendations
+    recommendations.extend([
+        f"\n{segment_count}. Target marketing campaigns during high-performing periods",
+        f"\n{segment_count + 1}. Prioritize high-value segments with personalized approaches",
+        f"\n{segment_count + 2}. Leverage predictive models for lead scoring and prioritization"
+    ])
+    
     return '\n'.join(recommendations)
 
     # prompt = f"""
