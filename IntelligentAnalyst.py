@@ -1,4 +1,7 @@
 import io
+import re
+import traceback
+import sys
 import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
@@ -912,131 +915,166 @@ def data_loader_agent(state: LLMState):
 # ----------------------------------------------------------------------
 # Agent: Data Summarizer – computes descriptive statistics and performs trend analysis.
 # ----------------------------------------------------------------------
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+# import streamlit as st
+
 def data_summarization_agent(state: LLMState):
     if state.memory.get("file_data") is None:
-        return {"response": "No file uploaded. Please upload a file for summarization."}
+        st.warning("No file uploaded. Please upload a file for summarization.")
+        return
 
     df = state.memory["file_data"]
-    summary_stats = df.describe().to_string()
+    
+    # Descriptive statistics as DataFrame
+    st.subheader("📊 Descriptive Statistics")
+    st.dataframe(df.describe().transpose(), use_container_width=True)
 
-    trend_analysis_text = ""
-    figure = None
-    # Check for a datetime column for trend analysis
-    time_columns = [
-        col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])
-    ]
+    # Trend Analysis
+    time_columns = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
     if time_columns:
         time_col = time_columns[0]
         df_sorted = df.sort_values(by=time_col)
-        # Choose first numerical column (excluding the datetime column)
         numeric_cols = df_sorted.select_dtypes(include=["number"]).columns.tolist()
+
         if numeric_cols:
             trend_col = numeric_cols[0]
             rolling_avg = df_sorted[trend_col].rolling(window=5).mean()
-            trend_analysis_text = f"\nTrend Analysis on {trend_col} (Rolling Average, window=5):\n{rolling_avg.tail(5).to_string()}"
 
-            # Create a matplotlib figure for visualization
+            st.subheader(f"📈 Trend Analysis of '{trend_col}' over time")
             fig, ax = plt.subplots()
-            ax.plot(df_sorted[time_col], df_sorted[trend_col], label="Original Data")
-            ax.plot(
-                df_sorted[time_col],
-                rolling_avg,
-                label="Rolling Average",
-                linestyle="--",
-            )
+            ax.plot(df_sorted[time_col], df_sorted[trend_col], label="Original", alpha=0.6)
+            ax.plot(df_sorted[time_col], rolling_avg, label="Rolling Average (window=5)", linestyle="--", color="orange")
             ax.set_xlabel(time_col)
             ax.set_ylabel(trend_col)
-            ax.set_title(f"Trend Analysis of {trend_col}")
+            ax.set_title(f"Trend of '{trend_col}'")
             ax.legend()
-            figure = fig
+            st.pyplot(fig)
 
-    raw_output = f"Descriptive Statistics:\n{summary_stats}{trend_analysis_text}"
-    final_output = two_way_exchange("data_summarization_agent", raw_output, state)
-    # Return the textual response and, if available, the figure for visualization.
-    return {"response": final_output, "figure": figure}
+    # Histograms for all numeric columns
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    if numeric_cols:
+        st.subheader("📉 Distribution of Numeric Columns")
+        for col in numeric_cols:
+            st.markdown(f"**Distribution of '{col}':**")
+            fig, ax = plt.subplots()
+            sns.histplot(df[col].dropna(), kde=True, ax=ax, bins=30, color='skyblue')
+            ax.set_title(f"Histogram of {col}")
+            ax.set_xlabel(col)
+            st.pyplot(fig)
 
+    # Summary narrative (optional refinement via LLM)
+    raw_summary = f"The dataset contains {df.shape[0]} rows and {df.shape[1]} columns. Descriptive stats and trend plots have been displayed above."
+    final_summary = two_way_exchange("data_summarization_agent", raw_summary, state)
+    st.subheader("📝 Summary")
+    st.write(final_summary)
+    return {"response": "✅ Summarization Completed"}
 
 # ----------------------------------------------------------------------
 # Agent: Python Executor – dynamically generates and executes Pandas code
 # to answer questions and returns just the execution result.
 # ----------------------------------------------------------------------
+
+# import streamlit as st
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+# import traceback
+# import io
+# import sys
+
 def python_executor_agent(state: LLMState):
     if state.memory.get("file_data") is None:
         return {"response": "No file loaded. Please upload a file first."}
+    
     df = state.memory["file_data"]
     query_lower = state.query.lower()
 
-    # If query asks for success or failure rates, compute and visualize them.
+    # Direct logic for specific keywords (success/failure rate)
     if "success rate" in query_lower or "failure rate" in query_lower:
         status_column = next((col for col in df.columns if "y" in col.lower()), None)
         if status_column:
             rates = df[status_column].value_counts(normalize=True) * 100
-            response_text = f"Success/Failure Rate (%):\n{rates.to_string()}"
+            st.write("✅ **Success/Failure Rate (%):**")
+            st.table(rates)
 
-            # Create a bar chart using matplotlib
             fig, ax = plt.subplots()
             rates.plot(kind="bar", ax=ax)
             ax.set_ylabel("Percentage")
-            ax.set_title(f"Success/Failure Rate for {status_column}")
-            return {"response": response_text, "figure": fig}
+            ax.set_title(f"Success/Failure Rate for `{status_column}`")
+            st.pyplot(fig)
+            return {"response": "Displayed success/failure rate and bar chart."}
         else:
-            return {
-                "response": "No status column found to compute success/failure rate."
-            }
+            return {"response": "No identifiable status column (like 'y') found to compute success/failure rate."}
 
-    # Otherwise, generate and execute Pandas code dynamically.
+    # Otherwise, dynamically generate code
     prompt = (
         f"Generate Pandas code to answer the following question: {state.query}\n"
         f"DataFrame columns available: {', '.join(df.columns)}\n"
+        "You are a python programmer and know all syntax of python code so write the codes accordingly to the Correct Python Syntax.\n"
         "Do not return only import statements or placeholders—write the complete executable code.\n"
         "Use the provided DataFrame `df` to perform the computation and assign the final result to a variable named `result`.\n"
-        "For example, if the question asks for descriptive statistics, your code should include something like:\n"
-        "`result = df.describe()`\n"
         "Return only the raw Python code—do not include explanations, markdown formatting, or comments.\n"
         "Ensure that the final computed value is stored in a variable named `result`\n"
-        "Do not generate comments and ensure perfect indentation.\n"
         "Do not define `df`, it will automatically be injected in the code.\n"
-        "The code structure should be like this: 1. import statements\n2. run(df) function and 3.calling the run(df)"
+        "Wrap all outputs using Streamlit `st.write`, `st.table`, or `st.pyplot(fig)`.\n"
+        "If there's a visualization, use `fig = plt.figure()` or `fig, ax = plt.subplots()` and call `st.pyplot(fig)`.\n"
+        "The code structure must be like:\n1. import statements (only necessary ones)\n2. `def run(df): ...`\n3. `run(df)`\n"
+        "Do not include markdown formatting (e.g., ```python).\n"
     )
 
     raw_code = "".join(chunk.content for chunk in llm.stream(prompt)).strip()
-    # Remove markdown formatting if present.
+
+    # Clean markdown fences if needed
     if raw_code.startswith("```"):
         raw_code_lines = raw_code.splitlines()
-        if raw_code_lines[0].startswith("```"):
-            raw_code_lines = raw_code_lines[1:]
-        if raw_code_lines and raw_code_lines[-1].startswith("```"):
-            raw_code_lines = raw_code_lines[:-1]
+        raw_code_lines = [line for line in raw_code_lines if not line.strip().startswith("```")]
         raw_code = "\n".join(raw_code_lines)
 
+    # Optional refinement step via second LLM
     refined_code = two_way_exchange("python_executor_agent", raw_code, state)
-
     if refined_code.startswith("```"):
         refined_code_lines = refined_code.splitlines()
-        if refined_code_lines[0].startswith("```"):
-            refined_code_lines = refined_code_lines[1:]
-        if refined_code_lines and refined_code_lines[-1].startswith("```"):
-            refined_code_lines = refined_code_lines[:-1]
+        refined_code_lines = [line for line in refined_code_lines if not line.strip().startswith("```")]
         refined_code = "\n".join(refined_code_lines)
 
-    # Debug: Log the refined code
-    print(
-        f"""# Executor agent used:\ndf: {df}\nraw_code: {raw_code}\nprompt: {prompt}\nrefined_code: {refined_code}"""
-    )
+    # Debug logging
+    print(f"# Executor agent used:\ndf: {df}\nraw_code: {raw_code}\nprompt: {prompt}\nrefined_code: {refined_code}")
+
+    # Execute code safely and capture output
+    exec_vars = {"df": df, "st": st, "plt": plt, "sns": sns}
+    stdout_backup = sys.stdout
+    sys.stdout = io.StringIO()
 
     try:
-        exec_vars = {"df": df}
         exec(refined_code, exec_vars, exec_vars)
-        print(f"""# Executor agent finished:\nexec_locals: {exec_vars}""")
-        if "result" not in exec_vars:
-            return {
-                "response": f"Execution completed, but no 'result' variable was set.\nGenerated Code:\n{refined_code}"
-            }
-        result_value = exec_vars.get("result")
+        run_output = sys.stdout.getvalue()
     except Exception as e:
-        result_value = f"Error executing code: {str(e)}\nCode:\n{refined_code}"
-    return {"response": str(result_value)}
+        sys.stdout = stdout_backup
+        error_msg = traceback.format_exc()
+        st.error("❌ Execution Error")
+        st.code(error_msg)
+        return {"response": f"Error during execution:\n{error_msg}"}
+    finally:
+        sys.stdout = stdout_backup
 
+    if "result" in exec_vars:
+        result = exec_vars["result"]
+        if isinstance(result, (pd.DataFrame, pd.Series)):
+            st.write("✅ **Result Table:**")
+            st.table(result)
+        else:
+            st.write("✅ **Result:**")
+            st.write(str(result))
+    elif "fig" in exec_vars:
+        st.write("✅ **Plot:**")
+        st.pyplot(exec_vars["fig"])
+    else:
+        st.write("✅ **Execution Complete:**")
+        if run_output:
+            st.text(run_output)
+
+    return {"response": "Dynamic query executed successfully."}
 
 # ----------------------------------------------------------------------
 # Agent: General AI – for general conversation questions.
@@ -1057,14 +1095,42 @@ def general_ai_agent(state: LLMState):
 # Supervisor: Selects the best agent based on query, file status, and chat history.
 # ----------------------------------------------------------------------
 def determine_agent(state: LLMState) -> str:
-    chat_hist = chat_history_text(state.memory.get("chat_history", []))
-    file_status = "yes" if state.memory.get("file_data") is not None else "no"
 
-    prompt = (
+    # Valid agents
+    valid_agents = {
+        "data_loader_agent",
+        "data_summarization_agent",
+        "data_analyser_agent",
+        "python_executor_agent",
+        "general_ai_agent"
+    }
+
+    # Normalize inputs
+    query = state.query.strip().lower()
+    file_available = state.memory.get("file_data") is not None
+    chat_hist = chat_history_text(state.memory.get("chat_history", []))
+
+    # Keyword-based routing rules
+    keyword_agent_map = [
+        (["read", "load", "upload", "structure", "columns", "schema"], "data_loader_agent"),
+        (["summary", "describe", "overview", "statistics", "basic info"], "data_summarization_agent"),
+        (["analyze", "analyse", "target", "audience", "pattern", "success pattern"], "data_analyser_agent"),
+        (["relationship", "correlation", "code", "plot", "graph", "visualize", "filter", "compare", "group by", "count", "distribution", "success rate", "failure rate", "histogram"], "python_executor_agent"),
+        (["weather", "who are you", "what is your name", "joke", "news"], "general_ai_agent"),
+    ]
+
+    # Direct keyword-based check
+    for keywords, agent in keyword_agent_map:
+        if any(re.search(rf"\b{re.escape(keyword)}\b", query) for keyword in keywords):
+            return agent
+
+    # If no keyword matched, fall back to LLM decision
+    file_status = "yes" if file_available else "no"
+    context_prompt = (
         "You are the head LLM tasked with choosing the most suitable agent for the current query. "
         "Consider the following context:\n\n"
         f"Chat History:\n{chat_hist}\n\n"
-        f'User Query: "{state.query.strip()}"\n'
+        f"User Query: \"{state.query.strip()}\"\n"
         f"File Available: {file_status}\n\n"
         "Available Agents:\n"
         "- data_loader_agent: For file structure analysis.\n"
@@ -1072,34 +1138,22 @@ def determine_agent(state: LLMState) -> str:
         "- data_analyser_agent: For analysing and giving the output for the target audiences.\n"
         "- python_executor_agent: For dynamically generating and executing Pandas code (e.g. column relationships, success/failure rates).\n"
         "- general_ai_agent: For general conversation.\n\n"
-        "Examples for guidance:\n"
-        "1. Chat History: None, User Query: 'Please load my data file so I can inspect its structure.', File Available: yes → Expected: data_loader_agent\n"
-        "2. Chat History: ['User uploaded file \"data.csv\".'], User Query: 'Can you provide descriptive statistics for the dataset?', File Available: yes → Expected: data_summarization_agent\n"
-        "3. Chat History: None, User Query: 'I need to analyse the data provided.', File Available: yes → Expected: data_analyser_agent\n"
-        "4. Chat History: None, User Query: 'I need to check the relationship between the columns \"age\" and \"income\" using code.', File Available: yes → Expected: python_executor_agent\n"
-        "5. Chat History: None, User Query: 'What is the weather like today?', File Available: no → Expected: general_ai_agent\n\n"
-        "Respond only with the name of the agent that best suits this query."
+        "Respond only with the agent name."
     )
 
-
-    decision = "".join(chunk.content for chunk in llm.stream(prompt)).strip().lower()
-    valid_agents = {
-        "data_loader_agent",
-        "data_summarization_agent",
-        "data_analyser_agent",
-        "python_executor_agent",
-        "general_ai_agent",
-    }
+    decision = "".join(chunk.content for chunk in llm.stream(context_prompt)).strip().lower()
     chosen_agent = decision if decision in valid_agents else "general_ai_agent"
 
-    selection_prompt = (
-        f"You selected {chosen_agent} based on the context. "
-        "After further analysis, confirm the final agent selection. Respond only with the final agent name."
+    # Double check the LLM's choice
+    confirm_prompt = (
+        f"You initially selected '{chosen_agent}' as the best fit.\n"
+        "Confirm that this is the most appropriate agent for the given query and context.\n"
+        "Respond only with one of the following agent names:\n"
+        f"{', '.join(valid_agents)}"
     )
 
-    final_decision = (
-        "".join(chunk.content for chunk in llm.stream(selection_prompt)).strip().lower()
-    )
+    final_decision = "".join(chunk.content for chunk in llm.stream(confirm_prompt)).strip().lower()
+
     return final_decision if final_decision in valid_agents else chosen_agent
 
 
@@ -1155,7 +1209,7 @@ def load_file(file) -> Optional[pd.DataFrame]:
 # ----------------------------------------------------------------------
 # Streamlit UI
 # ----------------------------------------------------------------------
-st.title("Dynamic AI-Powered Data Assistant with Local Python Execution")
+st.title("Intelligent Analyst")
 uploaded_file = st.file_uploader(
     "Upload a CSV or Excel file", type=["csv", "xls", "xlsx"]
 )
